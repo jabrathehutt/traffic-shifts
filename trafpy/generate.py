@@ -32,7 +32,7 @@ def generate_stochastic_volume(time_index, is_anomaly_array):
             multiplier = 5 # Volume shift magnitude
             
         # Convert sum of bytes to Tbits for your specific column format
-        volumes.append((sum(flow_sizes) * multiplier) / 1e12)
+        volumes.append((sum(flow_sizes) / 1e12) + 0.0005)
         
     return np.array(volumes)
 
