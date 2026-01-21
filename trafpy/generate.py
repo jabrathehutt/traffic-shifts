@@ -17,23 +17,21 @@ AS_IDS = {'AS100': 100, 'AS200': 200, 'AS300': 300, 'AS400': 400}
 # --- TRAFPY VOLUME ENGINE ---
 
 def generate_stochastic_volume(time_index, is_anomaly_array):
-    """Generates bytes using TrafPy distributions based on anomaly state."""
     volumes = []
     events_per_interval = 50
     
     for i in range(len(time_index)):
         if not is_anomaly_array[i]:
-            # Normal: Lognormal distribution
+            # Normal: mu=14
             flow_sizes = val_dists.gen_lognormal_dist(14, 2, 1, 1e7, events_per_interval)
-            multiplier = 1.0
+            # Standard baseline volume
+            volumes.append(sum(flow_sizes) / 1e12)
         else:
-            # Anomaly: Exponential heavy-tail
-            flow_sizes = val_dists.gen_exponential_dist(0.00001, 1, 1e7, events_per_interval)
-            multiplier = 2.5 # Volume shift magnitude
-            
-        # Convert sum of bytes to Tbits for your specific column format
-        volumes.append((sum(flow_sizes) * multiplier) / 1e12)
-        
+            # Anomaly: mu=16 (approx 7.3x larger per flow)
+            flow_sizes = val_dists.gen_lognormal_dist(16, 2.5, 1, 1e8, events_per_interval)
+            # Add a forced additive shift (0.0005 Tbits) to ensure it's not zero
+            forced_shift = 0.0005 
+            volumes.append((sum(flow_sizes) / 1e12) + forced_shift) 
     return np.array(volumes)
 
 # --- MASTER TEMPLATES ---
