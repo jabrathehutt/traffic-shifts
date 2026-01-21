@@ -4,12 +4,12 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 
-# --- CONFIGURATION (Aligned with your previous code) ---
+# --- CONFIGURATION ---
 START_DATE = '2025-01-01 00:00'
 END_DATE = '2025-01-08 00:00'
-FREQUENCY = '10min'  # Aligned with CESNET/TrafPy standard
+FREQUENCY = '10min' 
 OUTPUT_FILE = 'trafpy_master_univariate_data.csv'
-NUM_FLOWS_PER_GROUP = 2 # Set to 334 for your full dataset
+NUM_FLOWS_PER_GROUP = 2 # Set to your desired number of flows per group
 
 # AS Constants
 AS_IDS = {'AS100': 100, 'AS200': 200, 'AS300': 300, 'AS400': 400}
@@ -17,23 +17,23 @@ AS_IDS = {'AS100': 100, 'AS200': 200, 'AS300': 300, 'AS400': 400}
 # --- TRAFPY VOLUME ENGINE ---
 
 def generate_stochastic_volume(time_index, is_anomaly_array):
-    """Generates bytes using TrafPy distributions based on anomaly state."""
+    """Generates Mbits using TrafPy distributions based on anomaly state."""
     volumes = []
     events_per_interval = 50
     
+    print("Generating volume points...")
     for i in range(len(time_index)):
         if not is_anomaly_array[i]:
-            # Normal: Lognormal distribution
-            flow_sizes = val_dists.gen_lognormal_dist(25, 2, 1, 1e12, events_per_interval)
-            multiplier = 1.0
-            volumes.append(sum(flow_sizes) / 1e12)
+            # NORMAL: mu=14. Lower variance, standard baseline.
+            flow_sizes = val_dists.gen_lognormal_dist(_mu=14, _sigma=2, min_val=1, max_val=1e7, size=events_per_interval)
+            val = sum(flow_sizes) / 1e6 # MBits
         else:
-            # Anomaly: Exponential heavy-tail
-            flow_sizes = val_dists.gen_lognormal_dist(30, 2, 1, 1e15, events_per_interval)
-            multiplier = 5 # Volume shift magnitude
+            # ANOMALY: mu=18. Higher volume and higher variance.
+            flow_sizes = val_dists.gen_lognormal_dist(_mu=18, _sigma=3, min_val=1, max_val=1e9, size=events_per_interval)
+            # Add a forced baseline shift to make the surge undeniable
+            val = (sum(flow_sizes) / 1e6) + 500 
             
-        # Convert sum of bytes to Tbits for your specific column format
-            volumes.append((sum(flow_sizes) / 1e12) + 0.0005)
+        volumes.append(val)
         
     return np.array(volumes)
 
@@ -58,28 +58,21 @@ def generate_full_master_dataset():
     time_index = pd.date_range(start=START_DATE, end=END_DATE, freq=FREQUENCY, inclusive='left')
     all_flows = []
 
-    print(f"Generating Master Dataset: {len(time_index)} timestamps per flow.")
-
     for template in master_templates:
         print(f"Processing Group: {template['group']}")
         for i in tqdm(range(NUM_FLOWS_PER_GROUP)):
-            
-            # Metadata
             src_asn = template['asn']['src'] + i
             dst_asn = template['asn']['dst'] + i
             flow_id = f"{src_asn}-{dst_asn}_{template['group']}"
             
-            # Ground Truth
             is_anomaly = (time_index >= template['anomaly_window'][0]) & \
                          (time_index <= template['anomaly_window'][1])
             
-            # Generate Stochastic Volume
             traffic_volume = generate_stochastic_volume(time_index, is_anomaly)
             
-            # Construct DataFrame
             df = pd.DataFrame({
                 'timestamp': time_index,
-                'traffic_volume_Tbits': traffic_volume,
+                'traffic_volume_Mbits': traffic_volume,
                 'is_anomaly': is_anomaly,
                 'flow_key_id': flow_id,
                 'sourceAS': src_asn,
