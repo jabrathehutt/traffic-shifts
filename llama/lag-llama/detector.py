@@ -6,90 +6,86 @@ from tqdm import tqdm
 
 # --- CONFIG ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-METRICS_CSV = "/root/traffic-shifts/trafpy/trafpy_master_univariate_data.csv"
+TRAIN_CSV = "/root/traffic-shifts/llama/lag-llama/trafpy_finetune_normal_data.csv"
+TEST_CSV = "/root/traffic-shifts/trafpy/trafpy_master_univariate_data.csv"
 MODEL_PATH = "specialized_v11_supervised.pt"
 
-CONTEXT_LEN = 96
-N_LAYER = 1
-N_HEAD = 8
-LAGS_SEQ = list(range(1, 85)) 
-BATCH_SIZE = 128
+CONTEXT_LEN = 256  
+BATCH_SIZE = 64
+FREQ_MIN = 10 
 
-def apply_m_of_n_filter(scores, threshold, m, n):
-    """Alerts if at least M points in a window of size N are above threshold."""
-    raw_preds = (scores > threshold).astype(int)
-    flex_preds = np.zeros_like(raw_preds)
-    for i in range(len(raw_preds)):
-        if i >= n - 1:
-            window = raw_preds[i-(n-1) : i+1]
-            if np.sum(window) >= m:
-                flex_preds[i] = 1
-    return flex_preds
+def run_zero_delay_optimized():
+    df_train = pd.read_csv(TRAIN_CSV)
+    df_test = pd.read_csv(TEST_CSV)
 
-def run_recall_optimized_evaluation():
-    df = pd.read_csv(METRICS_CSV)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    # 1. Establish the Global Statistics
+    train_v = df_train['traffic_volume_Tbits'].values
+    GLOBAL_MEAN = np.mean(train_v)
+    GLOBAL_STD = np.std(train_v)
 
-    # Initialize and Load Model
+    # 2. Load Model
     module = LagLlamaLightningModule(
         context_length=CONTEXT_LEN, prediction_length=1,
         model_kwargs={
             "context_length": CONTEXT_LEN, "max_context_length": 1024, "input_size": 1,
-            "distr_output": StudentTOutput(), "n_layer": N_LAYER, "n_head": N_HEAD,
-            "n_embd_per_head": 16, "lags_seq": LAGS_SEQ, "scaling": "mean", "time_feat": False,
+            "distr_output": StudentTOutput(), "n_layer": 1, "n_head": 8,
+            "n_embd_per_head": 16, "lags_seq": list(range(1, 85)), "scaling": "mean", "time_feat": False,
         }
     )
     sd = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False)
     module.model.load_state_dict({k.replace("model.", ""): v for k, v in sd.items()}, strict=True)
     model = module.model.to(DEVICE).eval()
 
-    # Data Preparation
-    target_flow = df['flow_key_id'].unique()[0]
-    flow_df = df[df['flow_key_id'] == target_flow].sort_values('timestamp')
-    vol_col = 'traffic_volume_Tbits' if 'traffic_volume_Tbits' in flow_df.columns else 'traffic_volume_Gbits'
-    v = flow_df[vol_col].values.astype('float32')
+    # 3. Data Prep
+    test_flow = df_test['flow_key_id'].unique()[0]
+    flow_df = df_test[df_test['flow_key_id'] == test_flow].sort_values('timestamp')
+    v = flow_df['traffic_volume_Tbits'].values.astype('float32')
     y_true = (flow_df['is_anomaly'].values[CONTEXT_LEN:] == 1).astype(int)
 
-    # Inference for Z-Scores
-    z_scores = []
-    print("Generating model surprises (Z-Scores)...")
+    residuals = []
+    print(f"Applying Optimized Zero-Delay Detection: {test_flow}")
+    
     for i in tqdm(range(CONTEXT_LEN, len(v), BATCH_SIZE)):
         batch_end = min(i + BATCH_SIZE, len(v))
         windows = [v[j-CONTEXT_LEN:j] for j in range(i, batch_end)]
-        x_batch = torch.tensor(np.array(windows)).to(DEVICE)
-        y_batch = v[i:batch_end]
+        x_batch = torch.tensor(np.array(windows)).to(DEVICE).float()
+        y_actual = v[i:batch_end]
 
         with torch.no_grad():
-            scale_f = x_batch.mean(dim=1, keepdim=True) + 1e-5
-            distr_args, _, _ = model(past_target=x_batch/scale_f, past_observed_values=torch.ones_like(x_batch).to(DEVICE))
-            p_loc = (distr_args[0][:, -1] * scale_f.squeeze(-1)).cpu().numpy()
-            p_scale = (torch.exp(distr_args[1][:, -1]) * scale_f.squeeze(-1)).cpu().numpy()
-            z_scores.extend(np.abs(p_loc - y_batch) / (p_scale + 1e-10))
+            scale_f = torch.tensor([[GLOBAL_MEAN + 1e-5]]).to(DEVICE).float()
+            distr_args, _, _ = model(past_target=x_batch/scale_f, past_observed_values=torch.ones_like(x_batch).to(DEVICE).float())
+            y_pred_val = (distr_args[0][:, -1] * scale_f.squeeze(-1)).cpu().numpy()
+            residuals.extend(np.abs(y_actual - y_pred_val))
 
-    z_array = np.array(z_scores)
-
-    # --- GRID SEARCH FOR RECALL BOOST ---
-    print("\nSearching for Optimal M-of-N Configuration...")
-    # Exploring lower thresholds (starting from 1.0) to find subtle anomalies
-    thresholds = np.linspace(1.0, 5.0, 20)
-    windows_to_test = [(2, 3), (2, 4), (3, 5), (4, 6)] # (M, N) pairs
+    res_array = np.array(residuals)
     
-    results = []
-    for t in thresholds:
-        for m, n in windows_to_test:
-            y_pred = apply_m_of_n_filter(z_array, t, m, n)
-            f1 = f1_score(y_true, y_pred, zero_division=0)
-            prec = precision_score(y_true, y_pred, zero_division=0)
-            rec = recall_score(y_true, y_pred, zero_division=0)
-            results.append({"Threshold": t, "M": m, "N": n, "F1": f1, "Prec": prec, "Rec": rec})
+    # 4. THRESHOLD TUNING
+    # 4.5 Sigma is usually the boundary for 1.0 Precision in backbone traffic
+    threshold = 4.5 * GLOBAL_STD 
+    y_pred = (res_array > threshold).astype(int)
 
-    res_df = pd.DataFrame(results)
-    best_config = res_df.sort_values("F1", ascending=False).head(5)
-    
+    # 5. Metrics
+    precision = precision_score(y_true, y_pred, zero_division=0)
+    recall = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+
+    # Delay Calculation
+    delay = 0
+    anomaly_indices = np.where(y_true == 1)[0]
+    if len(anomaly_indices) > 0:
+        first_true = anomaly_indices[0]
+        detections = np.where(y_pred[first_true:] == 1)[0]
+        if len(detections) > 0:
+            delay = detections[0] * FREQ_MIN
+
     print("\n" + "="*50)
-    print("TOP 5 RECALL-OPTIMIZED CONFIGURATIONS")
+    print(f"OPTIMIZED ZERO-DELAY (Threshold = {threshold:.4f} Tbits)")
+    print("-" * 50)
+    print(f"Precision:         {precision:.4f}")
+    print(f"Recall:            {recall:.4f}")
+    print(f"F1 Score:          {f1:.4f}")
+    print(f"Avg Detect Delay:  {delay:.2f} minutes")
     print("="*50)
-    print(best_config.to_string(index=False))
 
 if __name__ == "__main__":
-    run_recall_optimized_evaluation()
+    run_zero_delay_optimized()
