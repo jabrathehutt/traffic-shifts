@@ -9,7 +9,7 @@ from tqdm import tqdm
 START_DATE = '2025-01-01 00:00'
 END_DATE = '2025-01-20 00:00' 
 FREQUENCY = '10min' 
-OUTPUT_FILE = '/root/traffic/llama/lag-llama/trafpy_pretrain_data.csv'
+OUTPUT_FILE = '/root/traffic-shifts/llama/lag-llama/trafpy_pretrain_data.csv'
 
 def generate_clean_stochastic_volume(time_index, mu_val, sigma_val):
     volumes = []

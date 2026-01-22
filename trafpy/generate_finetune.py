@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 
-OUTPUT_FILE = '/root/traffic/llama/lag-llama/trafpy_finetune_normal_data.csv'
+OUTPUT_FILE = '/root/traffic-shifts/llama/lag-llama/trafpy_finetune_normal_data.csv'
 
 def generate_finetune_dataset():
     # Use same time range as your experiment

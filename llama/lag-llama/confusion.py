@@ -1,7 +1,9 @@
 import torch, numpy as np, pandas as pd, os
+import matplotlib.pyplot as plt
+import seaborn as sns
 from lag_llama.gluon.estimator import LagLlamaLightningModule
 from gluonts.torch.distributions import StudentTOutput
-from sklearn.metrics import precision_score, recall_score, f1_score
+from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
 from tqdm import tqdm
 
 # --- CONFIG ---
@@ -16,7 +18,6 @@ LAGS_SEQ = list(range(1, 85))
 BATCH_SIZE = 128
 
 def apply_m_of_n_filter(scores, threshold, m, n):
-    """Alerts if at least M points in a window of size N are above threshold."""
     raw_preds = (scores > threshold).astype(int)
     flex_preds = np.zeros_like(raw_preds)
     for i in range(len(raw_preds)):
@@ -26,11 +27,11 @@ def apply_m_of_n_filter(scores, threshold, m, n):
                 flex_preds[i] = 1
     return flex_preds
 
-def run_recall_optimized_evaluation():
+def run_evaluation_and_plot():
     df = pd.read_csv(METRICS_CSV)
     df['timestamp'] = pd.to_datetime(df['timestamp'])
 
-    # Initialize and Load Model
+    # 1. Load Model
     module = LagLlamaLightningModule(
         context_length=CONTEXT_LEN, prediction_length=1,
         model_kwargs={
@@ -43,16 +44,17 @@ def run_recall_optimized_evaluation():
     module.model.load_state_dict({k.replace("model.", ""): v for k, v in sd.items()}, strict=True)
     model = module.model.to(DEVICE).eval()
 
-    # Data Preparation
+    # 2. Prepare Data
     target_flow = df['flow_key_id'].unique()[0]
     flow_df = df[df['flow_key_id'] == target_flow].sort_values('timestamp')
     vol_col = 'traffic_volume_Tbits' if 'traffic_volume_Tbits' in flow_df.columns else 'traffic_volume_Gbits'
     v = flow_df[vol_col].values.astype('float32')
     y_true = (flow_df['is_anomaly'].values[CONTEXT_LEN:] == 1).astype(int)
+    timestamps = flow_df['timestamp'].values[CONTEXT_LEN:]
 
-    # Inference for Z-Scores
+    # 3. Inference
     z_scores = []
-    print("Generating model surprises (Z-Scores)...")
+    print("Generating Z-Scores...")
     for i in tqdm(range(CONTEXT_LEN, len(v), BATCH_SIZE)):
         batch_end = min(i + BATCH_SIZE, len(v))
         windows = [v[j-CONTEXT_LEN:j] for j in range(i, batch_end)]
@@ -68,28 +70,45 @@ def run_recall_optimized_evaluation():
 
     z_array = np.array(z_scores)
 
-    # --- GRID SEARCH FOR RECALL BOOST ---
-    print("\nSearching for Optimal M-of-N Configuration...")
-    # Exploring lower thresholds (starting from 1.0) to find subtle anomalies
-    thresholds = np.linspace(1.0, 5.0, 20)
-    windows_to_test = [(2, 3), (2, 4), (3, 5), (4, 6)] # (M, N) pairs
-    
-    results = []
-    for t in thresholds:
-        for m, n in windows_to_test:
-            y_pred = apply_m_of_n_filter(z_array, t, m, n)
-            f1 = f1_score(y_true, y_pred, zero_division=0)
-            prec = precision_score(y_true, y_pred, zero_division=0)
-            rec = recall_score(y_true, y_pred, zero_division=0)
-            results.append({"Threshold": t, "M": m, "N": n, "F1": f1, "Prec": prec, "Rec": rec})
+    # 4. Use your best configuration found previously
+    # Threshold: 2.05, M: 3, N: 5
+    best_t, best_m, best_n = 2.052632, 3, 5
+    y_pred = apply_m_of_n_filter(z_array, best_t, best_m, best_n)
 
-    res_df = pd.DataFrame(results)
-    best_config = res_df.sort_values("F1", ascending=False).head(5)
+    # 5. Plotting
+    cm = confusion_matrix(y_true, y_pred)
+    fig = plt.figure(figsize=(16, 10))
+    gs = fig.add_gridspec(2, 2)
     
-    print("\n" + "="*50)
-    print("TOP 5 RECALL-OPTIMIZED CONFIGURATIONS")
-    print("="*50)
-    print(best_config.to_string(index=False))
+    # Subplot: Confusion Matrix
+    ax1 = fig.add_subplot(gs[0, 0])
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax1)
+    ax1.set_title(f"Confusion Matrix ({best_m}-of-{best_n} Filter)")
+    ax1.set_xlabel("Predicted Label")
+    ax1.set_ylabel("True Label")
+    ax1.set_xticklabels(['Normal', 'Anomaly'])
+    ax1.set_yticklabels(['Normal', 'Anomaly'])
+
+    # Subplot: Timeline
+    ax2 = fig.add_subplot(gs[1, :])
+    v_window = v[CONTEXT_LEN:]
+    ax2.plot(timestamps, v_window, label='Traffic Volume', color='gray', alpha=0.4)
+    ax2.fill_between(timestamps, 0, v_window.max(), where=(y_true==1), 
+                     color='red', alpha=0.15, label='True Anomaly Window')
+    
+    # Correct detections vs Misses
+    hits = (y_true == 1) & (y_pred == 1)
+    misses = (y_true == 1) & (y_pred == 0)
+    
+    ax2.scatter(timestamps[hits], v_window[hits], color='green', s=20, label='True Positives (Correct)')
+    ax2.scatter(timestamps[misses], v_window[misses], color='orange', s=20, label='False Negatives (Missed)')
+    
+    ax2.set_title(f"Detection Timeline for {target_flow}")
+    ax2.legend()
+
+    plt.tight_layout()
+    plt.savefig('confusion_analysis.png')
+    print("Saved confusion_analysis.png")
 
 if __name__ == "__main__":
-    run_recall_optimized_evaluation()
+    run_evaluation_and_plot()
