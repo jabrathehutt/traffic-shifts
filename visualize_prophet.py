@@ -75,21 +75,12 @@ def visualize_prophet_force_aligned():
     ax1.legend(loc='upper left')
     ax1.grid(True, linestyle=':', alpha=0.6)
 
-    # Bottom Panel: Ground Truth vs Alarm
-    ax2.fill_between(plot_df['ds'], plot_df['is_anomaly'], color='green', alpha=0.25, label='Actual Anomaly (Ground Truth)')
-    ax2.step(plot_df['ds'], plot_df['is_detected'], where='post', color='red', label='Prophet Detection Alarm', linewidth=2)
-    ax2.set_yticks([0, 1])
-    ax2.set_yticklabels(['Normal', 'ANOMALY'])
-    ax2.set_title("Temporal Detection Alignment", fontsize=12)
-    ax2.legend(loc='upper left')
-
-    # Formatting Timestamps to be legible
-    ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
+    ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
     plt.xticks(rotation=30, ha='right')
 
     plt.tight_layout()
-    plt.savefig("prophet_recall_visual.png", dpi=300)
+    plt.savefig("prophet_visual.png", dpi=300)
     print("Success: Visualization saved to prophet_recall_visual.png")
     plt.show()
 
