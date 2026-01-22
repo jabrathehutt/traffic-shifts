@@ -62,7 +62,7 @@ def visualize_prophet_force_aligned():
         plot_df = df_pred.iloc[:200].copy()
 
     # 8. Visualization with Clean Timestamps
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
+    fig, (ax1) = plt.subplots(1, 1, figsize=(15, 10), sharex=True)
 
     # Top Panel: Detection Boundaries
     ax1.plot(plot_df['ds'], plot_df['y'], label='Actual Traffic (Test)', color='#1f77b4', zorder=3)
@@ -81,7 +81,7 @@ def visualize_prophet_force_aligned():
 
     plt.tight_layout()
     plt.savefig("prophet_visual.png", dpi=300)
-    print("Success: Visualization saved to prophet_recall_visual.png")
+    print("Success: Visualization saved to prophet_visual.png")
     plt.show()
 
 if __name__ == "__main__":
