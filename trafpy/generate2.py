@@ -8,59 +8,59 @@ from tqdm import tqdm
 # --- CONFIGURATION ---
 START_DATE = '2025-01-01 00:00'
 END_DATE = '2025-01-08 00:00'
-FREQUENCY = '10min' 
+FREQUENCY = '10min'
 OUTPUT_FILE = 'trafpy_master_univariate_data.csv'
 NUM_FLOWS = 5
 
-def generate_hard_master_dataset():
+def generate_thesis_dataset():
     time_index = pd.date_range(START_DATE, END_DATE, freq=FREQUENCY, inclusive='left')
     all_flows = []
-    freq_seconds = 600 
-
-    print(f"Generating {NUM_FLOWS} flows with overlapping distributions...")
+    
+    print(f"Generating {NUM_FLOWS} flows: TrafPy Baseline + Structural Anomalies...")
 
     for f_idx in range(NUM_FLOWS):
         flow_id = f"Flow_{f_idx}"
         volumes = np.zeros(len(time_index))
         is_anomaly = np.zeros(len(time_index), dtype=bool)
-        actual_starts = [None] * len(time_index)
-        
-        # 1. Baseline: mu=14.0, sigma=3.0 (Higher variance makes tails fatter)
+
+        # 1. Baseline: Standard TrafPy Log-Normal Jitter
+        # We use mu=14.0 and sigma=1.2 (reduced from 3.0 to make the baseline stable enough to learn)
         for i in range(len(time_index)):
-            flow_sizes = val_dists.gen_lognormal_dist(14.0, 3.0, 1, 1e7, 50)
+            flow_sizes = val_dists.gen_lognormal_dist(14.0, 1.2, 1, 1e7, 50)
             volumes[i] = sum(flow_sizes) / 1e12
 
-        # 2. Schedule 10 Stealthy Anomalies per flow
-        for _ in range(10):
-            start_idx = random.randint(50, len(time_index) - 20)
-            duration = random.randint(3, 8)
+        # 2. Inject 5 Spikes and 5 Drifts per flow
+        for _ in range(5):
+            # --- SUDDEN SPIKE ---
+            s_start = random.randint(100, len(time_index) - 20)
+            s_dur = random.randint(2, 4)
+            s_indices = np.arange(s_start, s_start + s_dur)
+            # Magnitude: Add 3-5x the average volume
+            volumes[s_indices] += random.uniform(2.0, 5.0) 
+            is_anomaly[s_indices] = True
+
+            # --- GRADUAL DRIFT ---
+            d_start = random.randint(100, len(time_index) - 40)
+            while any(is_anomaly[d_start:d_start+10]): # Avoid overlap
+                d_start = random.randint(100, len(time_index) - 40)
+            d_dur = random.randint(10, 20)
+            d_indices = np.arange(d_start, d_start + d_dur)
             
-            # Sub-interval Jitter for Sampling Lag
-            jitter_seconds = random.randint(1, freq_seconds - 1)
-            true_start = time_index[start_idx] - pd.Timedelta(seconds=jitter_seconds)
-            
-            indices = np.arange(start_idx, start_idx + duration)
-            is_anomaly[indices] = True
-            
-            for idx in indices:
-                actual_starts[idx] = true_start
-                # HARD MODE: Anomaly mu (14.7) is very close to Baseline mu (14.0)
-                # No '+ 0.0006' forced shift here!
-                mu = 14.7 if random.random() > 0.5 else 14.3
-                flow_sizes = val_dists.gen_lognormal_dist(mu, 3.2, 1, 1e8, 50)
-                volumes[idx] = sum(flow_sizes) / 1e12
+            # Linear ramp magnitude
+            ramp = np.linspace(0, 3.0, d_dur)
+            volumes[d_indices] += ramp
+            is_anomaly[d_indices] = True
 
         df = pd.DataFrame({
             'timestamp': time_index,
             'traffic_volume_Tbits': volumes,
             'is_anomaly': is_anomaly,
-            'actual_start': actual_starts,
             'flow_key_id': flow_id
         })
         all_flows.append(df)
 
     pd.concat(all_flows, ignore_index=True).to_csv(OUTPUT_FILE, index=False)
-    print(f"Hard-mode dataset generated: {OUTPUT_FILE}")
+    print(f"Dataset generated: {OUTPUT_FILE}")
 
 if __name__ == "__main__":
-    generate_hard_master_dataset()
+    generate_thesis_dataset()

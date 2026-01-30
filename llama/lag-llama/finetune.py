@@ -4,17 +4,6 @@ from torch.utils.data import DataLoader, Dataset
 from lag_llama.gluon.estimator import LagLlamaLightningModule
 from gluonts.torch.distributions import StudentTOutput
 
-# --- ENVIRONMENT SHIMS & SEEDING ---
-def mock_strtobool(val):
-    val = str(val).lower()
-    return 1 if val in ('y', 'yes', 't', 'true', 'on', '1') else 0
-d_util = types.ModuleType("distutils.util"); d_util.strtobool = mock_strtobool
-sys.modules["distutils"] = types.ModuleType("distutils"); sys.modules["distutils.util"] = d_util
-m = types.ModuleType("gluonts.torch.modules.loss")
-class MockLoss: pass
-m.NegativeLogLikelihood = MockLoss; m.DistributionLoss = MockLoss
-sys.modules["gluonts.torch.modules.loss"] = m
-
 def seed_everything(seed=42):
     random.seed(seed); os.environ['PYTHONHASHSEED'] = str(seed); np.random.seed(seed)
     torch.manual_seed(seed); torch.cuda.manual_seed(seed)
@@ -22,84 +11,83 @@ seed_everything(42)
 
 # --- CONFIG ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-LOAD_PATH = "/root/traffic/llama/lag-llama/lag-llama-backbone.ckpt"
-METRICS_CSV = "/root/traffic/llama/lag-llama/trafpy_finetune_normal_data.csv"
-FINAL_PATH = "/root/traffic/llama/lag-llama/specialized_v11_supervised.pt"
+LOAD_PATH = "/root/traffic-shifts/llama/lag-llama/lag-llama-backbone.ckpt"
+METRICS_CSV = "/root/traffic-shifts/llama/lag-llama/trafpy_finetune_normal_data.csv"
+FINAL_PATH = "/root/traffic-shifts/llama/lag-llama/specialized_v11_supervised.pt"
 
-CONTEXT_LEN = 96
-N_LAYER = 1
-N_HEAD = 8
+CONTEXT_LEN = 512
 LAGS_SEQ = list(range(1, 85))
 
-class DualMarginDataset(Dataset):
+class OfficialDataset(Dataset):
     def __init__(self, csv_path, context_len):
         df = pd.read_csv(csv_path)
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        
-        # Select first available flow ID dynamically
-        target_flow = df['flow_key_id'].unique()[0]
-        flow_df = df[df['flow_key_id'] == target_flow].sort_values('timestamp')
-
-        v = flow_df['traffic_volume_Tbits'].values.astype('float32')
-        l = flow_df['is_anomaly'].astype('float32').values
-
         self.samples = []
-        self.context_len = context_len
-        if len(v) > self.context_len:
-            for i in range(self.context_len, len(v)):
-                self.samples.append({'x': v[i-self.context_len:i], 'y': v[i], 'label': l[i]})
+        for flow_id in df['flow_key_id'].unique():
+            flow_df = df[df['flow_key_id'] == flow_id].sort_values('timestamp')
+            v = flow_df['traffic_volume_Tbits'].values.astype('float32')
+            if len(v) > context_len:
+                for i in range(context_len, len(v)):
+                    self.samples.append({'x': v[i-context_len:i], 'y': v[i]})
 
     def __len__(self): return len(self.samples)
     def __getitem__(self, i):
-        return (torch.tensor(self.samples[i]['x']),
-                torch.tensor(self.samples[i]['y']),
-                torch.tensor(self.samples[i]['label']))
+        return torch.tensor(self.samples[i]['x']), torch.tensor(self.samples[i]['y'])
 
-def run_recall_boost_tuning():
-    full_dataset = DualMarginDataset(METRICS_CSV, CONTEXT_LEN)
+def run_official_finetuning():
+    full_dataset = OfficialDataset(METRICS_CSV, CONTEXT_LEN)
+    loader = DataLoader(full_dataset, batch_size=64, shuffle=True)
 
     module = LagLlamaLightningModule(
         context_length=CONTEXT_LEN, prediction_length=1,
         model_kwargs={
             "context_length": CONTEXT_LEN, "max_context_length": 1024, "input_size": 1,
-            "distr_output": StudentTOutput(), "n_layer": N_LAYER, "n_head": N_HEAD,
+            "distr_output": StudentTOutput(), "n_layer": 1, "n_head": 8,
             "n_embd_per_head": 16, "lags_seq": LAGS_SEQ, "scaling": "mean", "time_feat": False,
         }
     )
 
     if os.path.exists(LOAD_PATH):
-        sd = torch.load(LOAD_PATH, map_location=DEVICE, weights_only=False)
+        sd = torch.load(LOAD_PATH, map_location=DEVICE)
         new_sd = { (k if k.startswith("model.") else f"model.{k}"): v for k, v in sd.items() }
         module.load_state_dict(new_sd, strict=True)
 
     model = module.model.to(DEVICE); model.train()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-7)
-    loader = DataLoader(full_dataset, batch_size=64, shuffle=True)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-6)
 
-    for epoch in range(15):
-        pbar = tqdm(loader, desc=f"Recall Boost Epoch {epoch+1}")
-        for x, y, label in pbar:
-            x, y, label = x.to(DEVICE), y.to(DEVICE), label.to(DEVICE)
+    for epoch in range(20):
+        pbar = tqdm(loader, desc=f"MLE Finetune Epoch {epoch+1}")
+        for x, y in pbar:
+            x, y = x.to(DEVICE), y.to(DEVICE)
             optimizer.zero_grad()
-            with torch.enable_grad():
-                scale_f = x.mean(dim=1, keepdim=True) + 1e-5
-                distr_args, _, _ = model(past_target=x/scale_f, past_observed_values=torch.ones_like(x).to(DEVICE))
+            
+            scale_f = x.mean(dim=1, keepdim=True) + 1e-5
+            
+            # Forward pass
+            distr_args, loc, scale_p = model(
+                past_target=x / scale_f, 
+                past_observed_values=torch.ones_like(x).to(DEVICE)
+            )
+            
+            # --- FIX: Slicing for Batch broadcast ---
+            # distr_args[0] is df, loc is loc, scale_p is scale
+            # We take [:, -1] to get the parameters for the very last time step
+            df = distr_args[0][:, -1]
+            mu = loc[:, -1]
+            sigma = scale_p[:, -1]
+            
+            # Create distribution object for the last step only
+            distr = torch.distributions.StudentT(df, mu, sigma)
+            
+            # Calculate NLL Loss
+            y_norm = y / scale_f.squeeze()
+            loss = -distr.log_prob(y_norm).mean()
 
-                p_loc, p_scale = distr_args[0][:, -1], torch.exp(distr_args[1][:, -1])
-                y_norm = y / scale_f.squeeze()
-                z = torch.abs(p_loc - y_norm) / (p_scale + 1e-10)
-
-                # Adjusted margin loss for high-capacity Tbit surges
-                loss_normal = ((1 - label) * (torch.pow(z, 2) + 15.0 * p_scale)).mean()
-                loss_anomaly = (label * (torch.clamp(100.0 - z, min=0) + 10.0 * p_scale)).mean()
-                total_loss = (1.0 * loss_normal) + (60.0 * loss_anomaly)
-
-                total_loss.backward()
-                optimizer.step()
-                pbar.set_postfix(loss=f"{total_loss.item():.2f}")
+            loss.backward()
+            optimizer.step()
+            pbar.set_postfix(nll=f"{loss.item():.4f}")
 
     torch.save(model.state_dict(), FINAL_PATH)
     print(f"Weights saved to {FINAL_PATH}")
 
 if __name__ == "__main__":
-    run_recall_boost_tuning()
+    run_official_finetuning()
