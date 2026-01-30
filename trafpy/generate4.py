@@ -9,14 +9,14 @@ from tqdm import tqdm
 START_DATE = '2025-01-01 00:00'
 END_DATE = '2025-01-08 00:00'
 FREQUENCY = '10min'
-OUTPUT_FILE = 'trafpy_master_univariate_data.csv'
+OUTPUT_FILE = 'trafpy_master_univariate_data.csv' # Using your shared csv name
 NUM_FLOWS = 5 
 
 def generate_diurnal_thesis_dataset():
     time_index = pd.date_range(START_DATE, END_DATE, freq=FREQUENCY, inclusive='left')
     all_flows = []
 
-    print(f"Generating {NUM_FLOWS} Diurnal Flows with Visible Baseline...")
+    print(f"Generating {NUM_FLOWS} Visible Diurnal Flows...")
 
     for f_idx in range(NUM_FLOWS):
         flow_id = f"Flow_{f_idx}"
@@ -31,22 +31,20 @@ def generate_diurnal_thesis_dataset():
             diurnal_scale = 0.8 * np.sin(2 * np.pi * (ts.hour - 8) / 24)
             current_mu = base_mu + diurnal_scale
 
-            # GENERATION FIX: Generate 5000 flow samples to create a substantial baseline
-            # This ensures the sum is large enough to survive division
-            flow_sizes = val_dists.gen_lognormal_dist(current_mu, sigma, 1, 1e7, 5000)
+            # FIX 1: Explicitly pass integer for size (1000) to avoid TypeError
+            # FIX 2: Using wide bounds [1, 1e9] to ensure distributions can form
+            flow_sizes = val_dists.gen_lognormal_dist(current_mu, sigma, 1, 1e9, int(1000))
             
-            # DIVISOR FIX: Using 1e9 (Gbits to Tbits conversion style) 
-            # This keeps the 'Normal' traffic in the 5.0 - 15.0 Tbit range
-            volumes[i] = sum(flow_sizes) / 1e9
+            # FIX 3: Unit scaling. Dividing by 1e6 keeps the sum in the Tbit range
+            volumes[i] = sum(flow_sizes) / 1e6
 
         # 2. Inject SUBTLE Anomalies
-        # We use relative multipliers (e.g., 1.2x) so they scale with the baseline
         for _ in range(4):
             # --- SUBTLE SPIKE ---
             s_idx = random.randint(150, len(time_index) - 20)
             dur = random.randint(1, 2)
-            # Only a 30-50% increase over the current noisy peak
-            volumes[s_idx : s_idx+dur] *= random.uniform(1.3, 1.5)
+            # Magnitude: 1.3x to 1.6x of the current noisy baseline
+            volumes[s_idx : s_idx+dur] *= random.uniform(1.3, 1.6)
             is_anomaly[s_idx : s_idx+dur] = True
 
             # --- SUBTLE GRADUAL DRIFT ---
@@ -55,8 +53,8 @@ def generate_diurnal_thesis_dataset():
                 d_idx = random.randint(150, len(time_index)-50)
             d_dur = random.randint(10, 15)
             
-            # A ramp that peaks at only 20% above normal
-            drift_ramp = np.linspace(1.0, 1.2, d_dur)
+            # Ramp peaks at 30% increase
+            drift_ramp = np.linspace(1.0, 1.3, d_dur)
             volumes[d_idx : d_idx+d_dur] *= drift_ramp
             is_anomaly[d_idx : d_idx+d_dur] = True
 
@@ -69,7 +67,7 @@ def generate_diurnal_thesis_dataset():
         all_flows.append(df)
 
     pd.concat(all_flows, ignore_index=True).to_csv(OUTPUT_FILE, index=False)
-    print(f"Diurnal dataset saved: {OUTPUT_FILE}")
+    print(f"Dataset saved with visible Tbit baseline: {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     generate_diurnal_thesis_dataset()
