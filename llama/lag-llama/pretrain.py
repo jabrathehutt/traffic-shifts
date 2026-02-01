@@ -42,12 +42,12 @@ def run_extensive_pretraining():
 
     print("Initializing Lag-Llama Estimator (Strict Deterministic Mode)...")
     estimator = LagLlamaEstimator(
-        prediction_length=24,
+        prediction_length=1,
         context_length=512,
         batch_size=64,
         num_parallel_samples=100,
         trainer_kwargs={
-            "max_epochs": 20,
+            "max_epochs": 30,
             "accelerator": "gpu" if torch.cuda.is_available() else "cpu",
             "devices": 1,
             # --- 2. FIXING THE MISCONFIGURATION ---

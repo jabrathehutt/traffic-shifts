@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # --- CONFIGURATION ---
-INPUT_FILE = 'trafpy_pretrain_data_extended.csv'
+INPUT_FILE = 'trafpy_master_univariate_data.csv'
 
 def visualize_generated_data():
     # 1. Load the data
@@ -19,14 +19,14 @@ def visualize_generated_data():
 
     # 3. Create the Plot
     plt.figure(figsize=(15, 7))
-    
+
     # Plot normal traffic
-    plt.plot(flow_df['timestamp'], flow_df['traffic_volume_Tbits'], 
+    plt.plot(flow_df['timestamp'], flow_df['traffic_volume_Tbits'],
              label='Normal Traffic (Tbits)', color='blue', alpha=0.6, linewidth=1)
-    
+
     # Highlight anomalies in red
     anomalies = flow_df[flow_df['is_anomaly'] == True]
-    plt.scatter(anomalies['timestamp'], anomalies['traffic_volume_Tbits'], 
+    plt.scatter(anomalies['timestamp'], anomalies['traffic_volume_Tbits'],
                 color='red', label='Injected Anomalies', s=15, zorder=5)
 
     # 4. Annotate for Thesis Clarity
@@ -35,18 +35,19 @@ def visualize_generated_data():
     plt.ylabel("Traffic Volume (Tbits)", fontsize=12)
     plt.grid(True, which='both', linestyle='--', alpha=0.5)
     plt.legend()
-    
+
     # Add a zoom-in callout for the first drift if it exists
     if not anomalies.empty:
-        plt.annotate('Structural Drift/Spike', 
-                     xy=(anomalies['timestamp'].iloc[0], anomalies['traffic_volume_Tbits'].iloc[0]), 
+        plt.annotate('Structural Drift/Spike',
+                     xy=(anomalies['timestamp'].iloc[0], anomalies['traffic_volume_Tbits'].iloc[0]),
                      xytext=(anomalies['timestamp'].iloc[0], anomalies['traffic_volume_Tbits'].iloc[0] + 2),
                      arrowprops=dict(facecolor='black', shrink=0.05, width=1, headwidth=5))
 
     plt.tight_layout()
-    plt.savefig('anomaly_visualization.png')
+    plt.savefig('anomaly_visualization2.png')
     print("Visualization saved as 'anomaly_visualization.png'.")
     plt.show()
 
 if __name__ == "__main__":
-	visualize_generated_data()
+        visualize_generated_data()
+

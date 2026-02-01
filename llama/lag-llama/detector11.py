@@ -28,15 +28,17 @@ CONTEXT_LENGTH = 512
 MAX_CONTEXT_LENGTH = 1024
 PREDICTION_LENGTH = 1
 NUM_SAMPLES = 100 
-QUANTILE_THRESHOLD = 0.999 
 
-def run_total_dataset_evaluation():
-    # 1. Load Data
+# --- ADAPTIVE PRECISION TUNING ---
+# Instead of a fixed percentile, we use Mean + K * StdDev of the samples.
+# In a Student-T distribution, this captures the 'Heavy Tails' better.
+K_SIGMA = 5.0 # Increase this to 6.0 or 7.0 if False Positives persist
+
+def run_adaptive_detection():
     df = pd.read_csv(CSV_PATH)
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['traffic_volume_Tbits'] = df['traffic_volume_Tbits'].astype('float32')
 
-    # 2. Setup Architecture
     module = LagLlamaLightningModule(
         context_length=CONTEXT_LENGTH,
         max_context_length=MAX_CONTEXT_LENGTH,
@@ -56,46 +58,41 @@ def run_total_dataset_evaluation():
         module.model.load_state_dict(state_dict)
     module.to(DEVICE).float().eval()
 
-    # 3. Predictor Setup (Official API)
     estimator = LagLlamaEstimator(
         prediction_length=PREDICTION_LENGTH,
         context_length=CONTEXT_LENGTH,
-        batch_size=1,
+        batch_size=64,
         device=DEVICE
     )
     predictor = estimator.create_predictor(estimator.create_transformation(), module)
 
-    # 4. Total Dataset Loop
-    all_y_true = []
-    all_y_pred = []
-    
-    # We set the index to timestamp to satisfy the Series requirement
+    all_y_true, all_y_pred = [], []
     full_series = df.set_index('timestamp')['traffic_volume_Tbits']
     
-    print(f"Executing Full Dataset Forecast (Total points: {len(df)})...")
+    print(f"Executing Adaptive Spread Detection (K-Sigma: {K_SIGMA})...")
 
     for i in tqdm(range(len(df))):
-        # Slice for the current window
         window_series = full_series.iloc[:i]
-        
-        # If the window is shorter than CONTEXT_LENGTH, GluonTS handles the padding 
-        # internally via its transformation pipeline, but we need at least 1 point.
-        if len(window_series) == 0:
-            # Skip the very first point as there is literally no history to predict from
-            continue
+        if len(window_series) == 0: continue
 
         actual_val = df['traffic_volume_Tbits'].iloc[i]
         actual_label = df['is_anomaly'].iloc[i]
         
-        # Initialize with Series to satisfy the 'pair' ValueError check
         window_dataset = PandasDataset(window_series, freq="10min")
         
-        # Official Predictor Logic
         forecast_it = predictor.predict(window_dataset, num_samples=NUM_SAMPLES)
         forecast = list(forecast_it)[0]
         
-        # Quantile-based detection
-        upper_bound = np.quantile(forecast.samples, q=QUANTILE_THRESHOLD)
+        # --- ADAPTIVE SPREAD LOGIC ---
+        # We calculate the mean and std of the 100 'potential futures'
+        samples = forecast.samples.flatten()
+        pred_mean = np.mean(samples)
+        pred_std = np.std(samples)
+        
+        # Upper bound expands if the model is uncertain (high pred_std)
+        # This is key for bursty network traffic
+        upper_bound = pred_mean + (K_SIGMA * pred_std)
+        
         prediction = 1 if actual_val > upper_bound else 0
         
         all_y_true.append(actual_label)
@@ -108,11 +105,11 @@ def run_total_dataset_evaluation():
     tn, fp, fn, tp = confusion_matrix(all_y_true, all_y_pred).ravel()
 
     print("\n" + "="*45)
-    print(f"COMPLETE DATASET RESULTS (Total Points: {len(all_y_true)})")
+    print(f"ADAPTIVE SPREAD RESULTS (No Delay)")
     print("-" * 45)
     print(f"PRECISION: {precision:.4f} | RECALL: {recall:.4f} | F1: {f1:.4f}")
     print(f"TP: {tp} | FP: {fp} | TN: {tn} | FN: {fn}")
     print("="*45)
 
 if __name__ == "__main__":
-    run_total_dataset_evaluation()
+    run_adaptive_detection()

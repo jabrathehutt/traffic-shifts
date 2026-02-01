@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 import random
+import functools
 from gluonts.dataset.pandas import PandasDataset
 from lag_llama.gluon.estimator import LagLlamaEstimator, LagLlamaLightningModule
 from gluonts.torch.distributions import StudentTOutput
@@ -11,6 +12,9 @@ from tqdm import tqdm
 import warnings
 
 warnings.filterwarnings("ignore")
+
+if hasattr(torch.serialization, 'add_safe_globals'):
+    torch.serialization.add_safe_globals([functools.partial])
 
 def seed_everything(seed=42):
     random.seed(seed); os.environ['PYTHONHASHSEED'] = str(seed)
@@ -21,14 +25,14 @@ seed_everything(42)
 
 # --- CONFIG ---
 CSV_PATH = "/root/traffic-shifts/trafpy/trafpy_master_univariate_data.csv"
-CKPT_PATH = "specialized_v11_supervised.pt" 
+CKPT_PATH = "experiments/results/finetune_trafpy_v1/42/checkpoints/epoch-epoch=09.ckpt"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-CONTEXT_LENGTH = 512
-MAX_CONTEXT_LENGTH = 1024
+CONTEXT_LENGTH = 128
+MAX_CONTEXT_LENGTH = 2048
 PREDICTION_LENGTH = 1
-NUM_SAMPLES = 100 
-QUANTILE_THRESHOLD = 0.999 
+NUM_SAMPLES = 100
+QUANTILE_THRESHOLD = 0.9999
 
 def run_total_dataset_evaluation():
     # 1. Load Data
@@ -36,81 +40,81 @@ def run_total_dataset_evaluation():
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['traffic_volume_Tbits'] = df['traffic_volume_Tbits'].astype('float32')
 
-    # 2. Setup Architecture
+    # 2. Setup Architecture (Base)
     module = LagLlamaLightningModule(
         context_length=CONTEXT_LENGTH,
         max_context_length=MAX_CONTEXT_LENGTH,
         prediction_length=PREDICTION_LENGTH,
         model_kwargs={
             "context_length": CONTEXT_LENGTH, "max_context_length": MAX_CONTEXT_LENGTH,
-            "n_layer": 1, "n_head": 8, "n_embd_per_head": 16, 
+            "n_layer": 1, "n_head": 8, "n_embd_per_head": 16,
             "scaling": "mean", "time_feat": False, "input_size": 1,
-            "distr_output": StudentTOutput(), "lags_seq": list(range(1, 85))
+            "distr_output": StudentTOutput(), "lags_seq": list(range(1, 47))
         }
     )
 
-    state_dict = torch.load(CKPT_PATH, map_location=DEVICE)
-    if any(k.startswith('model.') for k in state_dict.keys()):
-        module.load_state_dict(state_dict)
-    else:
-        module.model.load_state_dict(state_dict)
+    # 3. Load Checkpoint & Surgery
+    if not os.path.exists(CKPT_PATH):
+        print(f"Error: {CKPT_PATH} not found.")
+        return
+
+    checkpoint = torch.load(CKPT_PATH, map_location=DEVICE, weights_only=False)
+    state_dict = checkpoint['state_dict']
+
+    expected_dim = state_dict['model.transformer.wte.weight'].shape[1]
+    embedding_dim = state_dict['model.transformer.wte.weight'].shape[0]
+
+    if module.model.transformer.wte.weight.shape[1] != expected_dim:
+        print(f"Surgery: Patching wte to {expected_dim}")
+        module.model.transformer.wte = torch.nn.Linear(expected_dim, embedding_dim, bias=False)
+
+    module.load_state_dict(state_dict)
     module.to(DEVICE).float().eval()
 
-    # 3. Predictor Setup (Official API)
+    # 4. Predictor Setup
+    # Removed 'freq' to fix TypeError. 
+    # GluonTS will infer frequency from the PandasDataset below.
     estimator = LagLlamaEstimator(
         prediction_length=PREDICTION_LENGTH,
         context_length=CONTEXT_LENGTH,
-        batch_size=1,
-        device=DEVICE
+        batch_size=1
     )
+
+    estimator.lags_seq = list(range(1, expected_dim))
     predictor = estimator.create_predictor(estimator.create_transformation(), module)
 
-    # 4. Total Dataset Loop
-    all_y_true = []
-    all_y_pred = []
-    
-    # We set the index to timestamp to satisfy the Series requirement
+    # 5. Evaluation Loop
+    all_y_true, all_y_pred = [], []
     full_series = df.set_index('timestamp')['traffic_volume_Tbits']
-    
-    print(f"Executing Full Dataset Forecast (Total points: {len(df)})...")
 
+    print(f"Executing Evaluation on {len(df)} points...")
     for i in tqdm(range(len(df))):
-        # Slice for the current window
         window_series = full_series.iloc[:i]
-        
-        # If the window is shorter than CONTEXT_LENGTH, GluonTS handles the padding 
-        # internally via its transformation pipeline, but we need at least 1 point.
-        if len(window_series) == 0:
-            # Skip the very first point as there is literally no history to predict from
-            continue
+        if len(window_series) == 0: continue
 
         actual_val = df['traffic_volume_Tbits'].iloc[i]
         actual_label = df['is_anomaly'].iloc[i]
-        
-        # Initialize with Series to satisfy the 'pair' ValueError check
+
+        # The frequency is defined here, which the predictor uses for transformation
         window_dataset = PandasDataset(window_series, freq="10min")
-        
-        # Official Predictor Logic
         forecast_it = predictor.predict(window_dataset, num_samples=NUM_SAMPLES)
         forecast = list(forecast_it)[0]
-        
-        # Quantile-based detection
+
         upper_bound = np.quantile(forecast.samples, q=QUANTILE_THRESHOLD)
         prediction = 1 if actual_val > upper_bound else 0
-        
+
         all_y_true.append(actual_label)
         all_y_pred.append(prediction)
 
-    # --- FINAL METRICS ---
+    # 6. Results
     precision = precision_score(all_y_true, all_y_pred, zero_division=0)
     recall = recall_score(all_y_true, all_y_pred, zero_division=0)
-    f1 = f1_score(all_y_true, all_y_pred, zero_division=0)
     tn, fp, fn, tp = confusion_matrix(all_y_true, all_y_pred).ravel()
 
     print("\n" + "="*45)
-    print(f"COMPLETE DATASET RESULTS (Total Points: {len(all_y_true)})")
+    print(f"SPECIALIZED BACKBONE (EPOCH 09) RESULTS")
     print("-" * 45)
-    print(f"PRECISION: {precision:.4f} | RECALL: {recall:.4f} | F1: {f1:.4f}")
+    print(f"PRECISION: {precision:.4f} | RECALL: {recall:.4f}")
     print(f"TP: {tp} | FP: {fp} | TN: {tn} | FN: {fn}")
     print("="*45)
 
