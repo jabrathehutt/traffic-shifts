@@ -20,24 +20,20 @@ import argparse
 import os
 import shutil
 import functools
-import random
-import numpy as np
-from hashlib import sha1
-
-import lightning
 import torch
 import wandb
+import numpy as np
 from gluonts.torch.distributions import StudentTOutput
 from gluonts.transform import (
     AddObservedValuesIndicator,
     Chain,
     ExpectedNumInstanceSampler,
-    ValidationSplitSampler,
     InstanceSplitter
 )
 from gluonts.dataset.loader import TrainDataLoader, ValidationDataLoader
 from gluonts.itertools import Cyclic
 from gluonts.torch.batchify import batchify
+import lightning
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch import Trainer
@@ -52,10 +48,10 @@ def train(args):
     lightning.seed_everything(args.seed)
     os.makedirs("models", exist_ok=True)
 
-    # --- THE STRICT TRIAL-BUILD SURGERY ---
+    # --- ARCHITECTURE SYNC & SURGERY ---
     is_finetune = False
     pretrained_sd = None
-    final_lags_count = 47 # Default fallback
+    final_lags_count = 47 # Default
 
     if args.get_ckpt_path_from_experiment_name:
         ckpt_path = f"models/{args.get_ckpt_path_from_experiment_name}.ckpt"
@@ -63,8 +59,8 @@ def train(args):
             print(f">>> FINETUNING MODE: Inspecting {ckpt_path} <<<")
             pretrained_sd = torch.load(ckpt_path, map_location="cpu", weights_only=False)['state_dict']
             target_width = pretrained_sd['model.transformer.wte.weight'].shape[1]
-            
-            # Trial-build to find the exact lag count that yields the target width
+
+            # Trial-build to align lag count with weight matrix width
             found_match = False
             for trial_count in range(target_width - 5, target_width + 2):
                 trial_lags = list(range(1, trial_count + 1))
@@ -81,10 +77,10 @@ def train(args):
                     final_lags_count = trial_count
                     found_match = True
                     break
-            
+
             if not found_match:
                 raise RuntimeError(f"Could not align architecture to backbone width {target_width}")
-            
+
             print(f"Architecture Sync: Locked at {final_lags_count} lags. Loading weights...")
             is_finetune = True
 
@@ -108,7 +104,7 @@ def train(args):
         module.load_state_dict(pretrained_sd, strict=True)
         print("SUCCESS: Weights loaded with perfect architecture parity.")
 
-    # 3. Data Loading
+    # 3. Data Pipeline
     data_root = args.dataset_path.rstrip('/')
     dataset_outputs = create_train_and_val_datasets_with_dates(
         args.single_dataset, data_root, 0, args.context_length + max(lags_seq), 1,
@@ -116,15 +112,12 @@ def train(args):
     )
     train_data, val_data = dataset_outputs[0], dataset_outputs[1]
 
-    # 4. Pipeline Build (Restoring your working compiled logic)
     transformation = Chain([
         AddObservedValuesIndicator(target_field="target", output_field="observed_values")
     ])
 
     instance_splitter = InstanceSplitter(
-        target_field="target",
-        is_pad_field="is_pad",
-        start_field="start",
+        target_field="target", is_pad_field="is_pad", start_field="start",
         forecast_start_field="forecast_start",
         instance_sampler=ExpectedNumInstanceSampler(num_instances=1.0, min_future=1),
         past_length=args.context_length + max(lags_seq),
@@ -134,21 +127,16 @@ def train(args):
     )
 
     train_dataloader = TrainDataLoader(
-        Cyclic(train_data),
-        transform=transformation + instance_splitter,
-        batch_size=args.batch_size,
-        stack_fn=batchify,
-        num_batches_per_epoch=100,
+        Cyclic(train_data), transform=transformation + instance_splitter,
+        batch_size=args.batch_size, stack_fn=batchify, num_batches_per_epoch=100,
     )
 
     val_dataloader = ValidationDataLoader(
-        val_data,
-        transform=transformation + instance_splitter,
-        batch_size=args.batch_size,
-        stack_fn=batchify,
+        val_data, transform=transformation + instance_splitter,
+        batch_size=args.batch_size, stack_fn=batchify,
     )
 
-    # 5. Execute Training
+    # 4. Trainer Configuration
     logger = WandbLogger(name=args.experiment_name, project=args.wandb_project, mode=args.wandb_mode)
     checkpoint_dir = os.path.join(args.results_dir, args.experiment_name, str(args.seed), "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -159,18 +147,31 @@ def train(args):
         logger=logger,
         callbacks=[
             EarlyStopping(monitor="train_loss", patience=5, mode="min"),
-            ModelCheckpoint(dirpath=checkpoint_dir, filename="best")
+            ModelCheckpoint(dirpath=checkpoint_dir, filename="best", monitor="train_loss", save_top_k=1, mode="min")
         ]
     )
 
     if not is_finetune: print(">>> PRETRAINING MODE <<<")
     trainer.fit(model=module, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
 
-    best_path = os.path.join(checkpoint_dir, "best.ckpt")
-    if os.path.exists(best_path):
-        target = "models/finetune_latest.ckpt" if is_finetune else "models/backbone_latest.ckpt"
-        shutil.copy(best_path, target)
-        print(f"SUCCESS: Exported model to {target}")
+    # --- 5. ENHANCED EXPORT LOGIC ---
+    target_path = "models/finetune_latest.ckpt" if is_finetune else "models/backbone_latest.ckpt"
+    
+    # Locate the best checkpoint path assigned by Lightning
+    best_ckpt_path = trainer.checkpoint_callback.best_model_path
+
+    if best_ckpt_path and os.path.exists(best_ckpt_path):
+        shutil.copy2(best_ckpt_path, target_path)
+        print(f"SUCCESS: Exported NEW BEST model to {target_path}")
+        print(f"Source Checkpoint: {best_ckpt_path}")
+    else:
+        # Fallback if checkpoint callback failed to trigger
+        torch.save({'state_dict': module.state_dict()}, target_path)
+        print(f"WARNING: No best_path found. Exported CURRENT weights to {target_path}")
+
+    # Log the final weight mean for verification
+    final_mean = module.model.transformer.wte.weight.mean().item()
+    print(f"Verification - Final WTE Mean: {final_mean:.10f}")
 
     wandb.finish()
 
