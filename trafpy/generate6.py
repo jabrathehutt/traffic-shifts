@@ -6,7 +6,7 @@ import random
 from tqdm import tqdm
 import os
 
-# --- DETERMINISM SETUP ---
+# --- DETERMINISM ---
 SEED = 42
 def seed_everything(seed):
     random.seed(seed)
@@ -15,18 +15,19 @@ def seed_everything(seed):
 
 seed_everything(SEED)
 
-# --- CONFIGURATION ---
+# --- CONFIG ---
 START_DATE = '2025-01-01 00:00'
 END_DATE = '2025-01-08 00:00'
-FREQUENCY = '10min'
+FREQUENCY = '5min'  # Updated to 5 minutes
 OUTPUT_FILE = 'trafpy_master_univariate_data.csv'
-NUM_FLOWS = 1
+NUM_FLOWS = 5
 
 def generate_diurnal_thesis_dataset():
+    # Frequency updated here
     time_index = pd.date_range(START_DATE, END_DATE, freq=FREQUENCY, inclusive='left')
     all_flows = []
 
-    print(f"Generating Deterministic Dataset (Seed: {SEED})...")
+    print(f"Generating {NUM_FLOWS} Deterministic Flows at {FREQUENCY} resolution...")
 
     for f_idx in range(NUM_FLOWS):
         flow_id = f"Flow_{f_idx}"
@@ -36,12 +37,11 @@ def generate_diurnal_thesis_dataset():
         base_mu = 10.0
         sigma = 1.0
 
-        # Generate the smooth diurnal wave
-        for i, ts in enumerate(tqdm(time_index, desc=f"Flow {f_idx}")):
-            diurnal_scale = 1.5 * np.sin(2 * np.pi * (ts.hour - 8) / 24)
+        for i, ts in enumerate(tqdm(time_index, desc=f"Generating {flow_id}")):
+            # Diurnal calculation remains accurate for 5-min intervals
+            diurnal_scale = 1.5 * np.sin(2 * np.pi * (ts.hour + ts.minute/60 - 8) / 24)
             current_mu = base_mu + diurnal_scale
 
-            # TrafPy uses np.random internally
             flow_sizes = val_dists.gen_lognormal_dist(_mu=current_mu,
                                                       _sigma=sigma,
                                                       min_val=0.01,
@@ -51,20 +51,18 @@ def generate_diurnal_thesis_dataset():
 
         std_dev = np.std(volumes)
 
-        # 2. Inject Persistent Structural Anomalies (Deterministic random calls)
         for _ in range(6):
-            # --- SPIKE ---
+            # Spike
             s_idx = random.randint(150, len(time_index) - 20)
-            dur = random.randint(1, 3)
+            dur = random.randint(2, 6) # Increased duration slightly for 5min resolution
             volumes[s_idx : s_idx+dur] += (std_dev * 2.5)
             is_anomaly[s_idx : s_idx+dur] = True
 
-            # --- GRADUAL DRIFT ---
-            d_idx = random.randint(150, len(time_index) - 50)
-            while any(is_anomaly[d_idx : d_idx+50]): # Checked duration safety
-                d_idx = random.randint(150, len(time_index)-50)
-            d_dur = random.randint(20, 40)
-
+            # Drift
+            d_idx = random.randint(150, len(time_index) - 100)
+            while any(is_anomaly[d_idx : d_idx+100]):
+                d_idx = random.randint(150, len(time_index)-100)
+            d_dur = random.randint(40, 80) # Increased duration for 5min resolution
             drift_ramp = np.linspace(0, std_dev * 3.0, d_dur)
             volumes[d_idx : d_idx+d_dur] += drift_ramp
             is_anomaly[d_idx : d_idx+d_dur] = True
@@ -78,7 +76,7 @@ def generate_diurnal_thesis_dataset():
         all_flows.append(df)
 
     pd.concat(all_flows, ignore_index=True).to_csv(OUTPUT_FILE, index=False)
-    print(f"Saved: {OUTPUT_FILE}")
+    print(f"Master dataset saved: {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     generate_diurnal_thesis_dataset()

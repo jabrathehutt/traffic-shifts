@@ -143,7 +143,7 @@ def train(args):
 
     trainer = Trainer(
         max_epochs=args.max_epochs,
-        accelerator="gpu", devices=[args.gpu],
+        accelerator="cpu", devices=1,
         logger=logger,
         callbacks=[
             EarlyStopping(monitor="train_loss", patience=5, mode="min"),

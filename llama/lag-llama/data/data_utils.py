@@ -85,11 +85,11 @@ def create_train_and_val_datasets_with_dates(
         class LocalMetadata:
             def __init__(self):
                 self.prediction_length = 1
-                self.freq = "10min"
+                self.freq = "5min"
         
         raw_train_ds = PandasDataset.from_long_dataframe(
             df, target="traffic_volume_Tbits", timestamp="timestamp", 
-            item_id="flow_key_id", freq="10min"
+            item_id="flow_key_id", freq="5min"
         )
         # For training, we treat test same as train to satisfy the logic
         raw_dataset = TrainDatasets(metadata=LocalMetadata(), train=raw_train_ds, test=raw_train_ds)
@@ -155,12 +155,12 @@ def create_test_dataset(name, dataset_path, history_length, freq=None, data_id=N
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         raw_ds = PandasDataset.from_long_dataframe(
             df, target="traffic_volume_Tbits", timestamp="timestamp", 
-            item_id="flow_key_id", freq="10min"
+            item_id="flow_key_id", freq="5min"
         )
         class LocalMetadata:
             def __init__(self):
                 self.prediction_length = 1
-                self.freq = "10min"
+                self.freq = "5min"
         dataset = TrainDatasets(metadata=LocalMetadata(), train=raw_ds, test=raw_ds)
     else:
         dataset = get_dataset(name, path=Path(dataset_path))
