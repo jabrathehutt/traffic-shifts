@@ -31,8 +31,8 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CONTEXT_LENGTH = 128
 MAX_CONTEXT_LENGTH = 2048
 PREDICTION_LENGTH = 1
-NUM_SAMPLES = 100
-QUANTILE_THRESHOLD = 0.977777775
+NUM_SAMPLES = 200
+QUANTILE_THRESHOLD = 0.975
 
 def run_verified_evaluation():
     # 1. Load Data

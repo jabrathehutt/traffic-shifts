@@ -1,5 +1,3 @@
-finetune.sh
-
 #!/bin/bash
 BACKBONE_NAME="backbone_latest"
 EXP_NAME="finetune_trafpy_specialized"
@@ -25,7 +23,7 @@ python run.py \
     --n_embd_per_head 16 \
     --time_feat \
     --lags_seq $(seq 1 47) \
-    --lr 0.001 \
+    --lr 0.0001 \
     --use_dataset_prediction_length \
     --num_validation_windows 1 \
     --wandb_mode "offline"
