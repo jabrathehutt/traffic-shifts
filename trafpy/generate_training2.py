@@ -48,7 +48,7 @@ def generate_clean_trafpy_dataset(filename, days, seed):
 
 if __name__ == "__main__":
     # Generate Pre-training Baseline (Longer)
-    generate_clean_trafpy_dataset('trafpy_pretrain_data_extended.csv', days=5000, seed=100)
+    generate_clean_trafpy_dataset('trafpy_pretrain_data_extended.csv', days=120, seed=100)
 
     # Generate Fine-tuning Baseline (Standard duration)
     generate_clean_trafpy_dataset('trafpy_finetune_normal_data.csv', days=7, seed=200)

@@ -45,5 +45,5 @@ def generate_multi_flow_clean_data(filename, days, seed, num_flows=5):
     print(f"Saved: {filename}")
 
 if __name__ == "__main__":
-    generate_multi_flow_clean_data('trafpy_pretrain_data_extended.csv', days=1200, seed=100)
+    generate_multi_flow_clean_data('trafpy_pretrain_data_extended.csv', days=120, seed=100)
     generate_multi_flow_clean_data('trafpy_finetune_normal_data.csv', days=7, seed=200)

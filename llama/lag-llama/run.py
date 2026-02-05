@@ -51,7 +51,7 @@ def train(args):
     # --- ARCHITECTURE SYNC & SURGERY ---
     is_finetune = False
     pretrained_sd = None
-    final_lags_count = 47 # Default
+    final_lags_count = 95 # Default
 
     if args.get_ckpt_path_from_experiment_name:
         ckpt_path = f"models/{args.get_ckpt_path_from_experiment_name}.ckpt"
@@ -143,7 +143,7 @@ def train(args):
 
     trainer = Trainer(
         max_epochs=args.max_epochs,
-        accelerator="cpu", devices=1,
+        accelerator="gpu", devices=[args.gpu],
         logger=logger,
         callbacks=[
             EarlyStopping(monitor="train_loss", patience=5, mode="min"),

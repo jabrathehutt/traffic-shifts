@@ -17,13 +17,13 @@ python run.py \
     --single_dataset "trafpy_finetune_normal_data" \
     --get_ckpt_path_from_experiment_name $BACKBONE_NAME \
     --wandb_project "lag-llama-test" \
-    --context_length 128 \
+    --context_length 256 \
     --n_layer 1 \
     --n_head 8 \
     --n_embd_per_head 16 \
     --time_feat \
-    --lags_seq $(seq 1 47) \
-    --lr 0.0001 \
+    --lags_seq $(seq 1 95) \
+    --lr 0.000000000000000001 \
     --use_dataset_prediction_length \
     --num_validation_windows 1 \
     --wandb_mode "offline"
