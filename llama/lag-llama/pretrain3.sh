@@ -1,6 +1,6 @@
 rm -rf experiments/results/pretraining_lag_llama_trafpy
 rm -f models/backbone_latest.ckpt
-python run.py \
+python run2.py \
     -e "pretraining_lag_llama_trafpy" \
     -d "/root/traffic-shifts/trafpy" \
     --single_dataset "trafpy_pretrain_data_extended" \
@@ -13,3 +13,4 @@ python run.py \
     --lr 0.0001 \
     --max_epochs 15\
     --wandb_mode "offline"
+

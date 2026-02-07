@@ -48,12 +48,10 @@ def train(args):
     lightning.seed_everything(args.seed)
     os.makedirs("models", exist_ok=True)
 
-    # --- DEVICE AUTO-DETECTION ---
-    # Determine device for architecture surgery and manual loading
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Detected device: {device.upper()}")
+    print(f"Using device: {device.upper()}")
 
-    # --- ARCHITECTURE SYNC & SURGERY ---
+    # --- ARCHITECTURE SYNC ---
     is_finetune = False
     pretrained_sd = None
     final_lags_count = 95 
@@ -62,7 +60,6 @@ def train(args):
         ckpt_path = f"models/{args.get_ckpt_path_from_experiment_name}.ckpt"
         if os.path.exists(ckpt_path):
             print(f">>> FINETUNING MODE: Inspecting {ckpt_path} <<<")
-            # Load to current device (cpu or cuda) to avoid mismatch
             pretrained_sd = torch.load(ckpt_path, map_location=device, weights_only=False)['state_dict']
             target_width = pretrained_sd['model.transformer.wte.weight'].shape[1]
 
@@ -73,7 +70,7 @@ def train(args):
                     context_length=args.context_length, max_context_length=2048, prediction_length=1,
                     model_kwargs={
                         "context_length": args.context_length, "max_context_length": 2048,
-                        "n_layer": args.n_layer, "n_head": args.n_head, "n_embd_per_head": args.n_embd_per_head,
+                        "n_layer": args.n_layer, "n_head": args.n_head, "n_embd_per_head": 16,
                         "scaling": args.data_normalization, "time_feat": False, "input_size": 1,
                         "distr_output": StudentTOutput(), "lags_seq": trial_lags
                     }
@@ -82,24 +79,19 @@ def train(args):
                     final_lags_count = trial_count
                     found_match = True
                     break
-
-            if not found_match:
-                raise RuntimeError(f"Could not align architecture to backbone width {target_width}")
-
-            print(f"Architecture Sync: Locked at {final_lags_count} lags. Loading weights...")
+            if not found_match: raise RuntimeError("Architecture mismatch.")
             is_finetune = True
 
     lags_seq = list(range(1, final_lags_count + 1))
     distr_output = StudentTOutput()
 
-    # 2. Build Module
     module = LagLlamaLightningModule(
         context_length=args.context_length,
         max_context_length=2048,
         prediction_length=1,
         model_kwargs={
             "context_length": args.context_length, "max_context_length": 2048,
-            "n_layer": args.n_layer, "n_head": args.n_head, "n_embd_per_head": args.n_embd_per_head,
+            "n_layer": args.n_layer, "n_head": args.n_head, "n_embd_per_head": 16,
             "scaling": args.data_normalization, "time_feat": False, "input_size": 1,
             "distr_output": distr_output, "lags_seq": lags_seq
         }
@@ -107,7 +99,7 @@ def train(args):
 
     if is_finetune:
         module.load_state_dict(pretrained_sd, strict=True)
-        print("SUCCESS: Weights loaded with perfect architecture parity.")
+        print("SUCCESS: Backbone weights loaded.")
 
     # 3. Data Pipeline
     data_root = args.dataset_path.rstrip('/')
@@ -117,37 +109,45 @@ def train(args):
     )
     train_data, val_data = dataset_outputs[0], dataset_outputs[1]
 
+    # --- MASKING LOGIC ---
+    # AddObservedValuesIndicator is the official way to tell Lag-Llama 
+    # what data is 'real' and what is 'missing/masked'.
     transformation = Chain([
         AddObservedValuesIndicator(target_field="target", output_field="observed_values")
     ])
 
     instance_splitter = InstanceSplitter(
-        target_field="target", is_pad_field="is_pad", start_field="start",
+        target_field="target",
+        is_pad_field="is_pad",
+        start_field="start",
         forecast_start_field="forecast_start",
         instance_sampler=ExpectedNumInstanceSampler(num_instances=1.0, min_future=1),
         past_length=args.context_length + max(lags_seq),
         future_length=1,
-        time_series_fields=["observed_values"],
+        time_series_fields=["observed_values"], 
         dummy_value=distr_output.value_in_support,
     )
 
     train_dataloader = TrainDataLoader(
-        Cyclic(train_data), transform=transformation + instance_splitter,
-        batch_size=args.batch_size, stack_fn=batchify, num_batches_per_epoch=100,
+        Cyclic(train_data), 
+        transform=transformation + instance_splitter,
+        batch_size=args.batch_size, 
+        stack_fn=batchify, 
+        num_batches_per_epoch=100,
     )
 
     val_dataloader = ValidationDataLoader(
-        val_data, transform=transformation + instance_splitter,
-        batch_size=args.batch_size, stack_fn=batchify,
+        val_data, 
+        transform=transformation + instance_splitter, 
+        batch_size=args.batch_size, 
+        stack_fn=batchify
     )
 
-    # 4. Trainer Configuration
+    # 4. Trainer
     logger = WandbLogger(name=args.experiment_name, project=args.wandb_project, mode=args.wandb_mode)
     checkpoint_dir = os.path.join(args.results_dir, args.experiment_name, str(args.seed), "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    # UPDATED: Use accelerator="auto" and devices="auto"
-    # This will use CUDA if available, otherwise CPU
     trainer = Trainer(
         max_epochs=args.max_epochs,
         accelerator="auto", 
@@ -159,23 +159,17 @@ def train(args):
         ]
     )
 
-    if not is_finetune: print(">>> PRETRAINING MODE <<<")
     trainer.fit(model=module, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
 
-    # --- 5. ENHANCED EXPORT LOGIC ---
+    # 5. Export
     target_path = "models/finetune_latest.ckpt" if is_finetune else "models/backbone_latest.ckpt"
     best_ckpt_path = trainer.checkpoint_callback.best_model_path
-
     if best_ckpt_path and os.path.exists(best_ckpt_path):
         shutil.copy2(best_ckpt_path, target_path)
-        print(f"SUCCESS: Exported NEW BEST model to {target_path}")
     else:
         torch.save({'state_dict': module.state_dict()}, target_path)
-        print(f"WARNING: No best_path found. Exported CURRENT weights to {target_path}")
 
-    final_mean = module.model.transformer.wte.weight.mean().item()
-    print(f"Verification - Final WTE Mean: {final_mean:.10f}")
-
+    print(f"Final WTE Mean: {module.model.transformer.wte.weight.mean().item():.10f}")
     wandb.finish()
 
 if __name__ == "__main__":
@@ -191,7 +185,7 @@ if __name__ == "__main__":
     parser.add_argument("-b", "--batch_size", type=int, default=64)
     parser.add_argument("-m", "--max_epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--gpu", type=int, default=0) # Kept for backward compat but trainer now uses 'auto'
+    parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("-r", "--results_dir", type=str, default="experiments/results")
     parser.add_argument("--wandb_project", type=str, default="lag-llama-test")
     parser.add_argument("--wandb_mode", type=str, default="offline")
