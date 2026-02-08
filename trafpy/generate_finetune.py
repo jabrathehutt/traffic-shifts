@@ -18,7 +18,7 @@ seed_everything(SEED)
 # --- CONFIG ---
 # Use a longer window for fine-tuning to provide more 'examples'
 START_DATE = '2025-02-01 00:00'
-END_DATE = '2025-02-08 00:00' 
+END_DATE = '2025-09-01 00:00' 
 FREQUENCY = '5min'
 OUTPUT_FILE = 'trafpy_finetune_labeled_data.csv'
 NUM_FLOWS = 3 # Fewer flows but longer time is better for fine-tuning
